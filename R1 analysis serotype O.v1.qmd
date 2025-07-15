@@ -1,0 +1,413 @@
+---
+title: "ML R1 prediction models for serotype O"
+format: html
+editor: visual
+---
+
+## Apply ML models to predict cross-protection using R1 values
+
+Recommended R1 cutoff values for cross protection is 0.3, where it is assumed that \>0.3 values indicated cross protection between two viruses (serum vs. virus pairs). However, the accuracy of this cutoff has been debated but it is still the prescribed and used approach.
+
+Variations of two ML approaches will be explored with minor tweaks to achieve the best models
+
+## Visualize phylogenetic tree
+
+See distribution of sequences on a phylogenetic tree to assess representation of serum/vaccines and viruses used in this analysis
+
+```{r}
+pacman::p_load(ggtree,ggplot2,scales,stringr,muscle,lubridate,bioseq,dplyr,zoo,tidytree,
+               readxl,janitor,Biostrings,qualpalr,phytools,treeio,tidyr,phylotools,
+               picante,ape,vegan,tidyverse,Hmisc)
+source("G:\\My Drive\\Local D\\R&Stata toolbox\\theme_dennis.R")
+path <- "G:/My Drive/Desktop/To_Do/FMD in EA-HORN/"
+# plot tree with anotations----
+tree.O <- read.tree(paste0(path,paste("Synthesis files/R1/sero.o/ML R1 serotype O/RAxML_bestTree.tree")))
+met <- read.csv(paste0(path,paste("Data files/R1 data/serotype.O.met.csv"))) %>% 
+  glimpse()
+met$accession <- gsub(" ", "", met$accession, fixed = TRUE) #works better than trimws
+
+pal= qualpal(9, colorspace=list(h=c(0,360), s=c(0.3,1), l=c(0.2,0.8)))
+
+tr <- ggtree(tree.O,right = F, lwd =0.8,aes(color=as.factor(serum.vaccine))) %<+% met + 
+  theme_tree()+
+  #geom_tiplab(aes(label = id),align = T, size=2)+
+  geom_tippoint(aes(color=as.factor(topotype)), size = 2.5)+
+  #geom_line(aes(color=topotype))+
+  scale_color_manual(name= "Serum/vaccine",values = pal$hex);tr 
+
+```
+
+## ML model development
+
+See distribution of sequences on a phylogenetic tree to assess representation of serum/vaccines and viruses used in this analysis
+
+```{r}
+# Set up analytical pipeline based on PRRSV models----
+pacman::p_load(shiny,shinydashboard,shinythemes,dashboardthemes,shinyWidgets,
+               shinyStore,rpart,caTools,caret,rpart.plot,randomForest,ROSE,DMwR2,
+               randomForestExplainer,pROC,ROCR,missForest,Rforestry,gbm,pdp,ggplot2, iml, 
+               Boruta,plyr,dplyr,ggpubr,janitor,readxl,bioseq,muscle,ape,
+               BiocManager,BiocVersion,phylotools,seqinr,reshape2,DECIPHER)
+
+#load data preprocessed data
+df_final <- read.csv(paste0(path,paste("Data files/R1 data/r1_aa_plus_ngly.csv"))) %>% glimpse()
+
+```
+
+```{r}
+cor.test(df_final$r1,df_final$aa.dist,method = "spearman")#-0.36 p= 0.0001125
+o.cor.plt <- ggscatter(df_final,
+                                   x="r1", 
+                                   y="aa.dist", 
+                                   merge = T, add = "reg.line",
+                                   conf.int = F, cor.coef = T, cor.method = "spearman",
+                                   xlab ="P amino acid distance" ,ylab ="R1 values" ,
+                                   title = "")+
+  theme_dennis(); o.cor.plt
+ggsave("Synthesis files/R1/sero.o/o.cor.plt.pdf", plot = o.cor.plt, width = 16,
+       height = 10, dpi = 400, units = "in");dev.off()
+
+
+```
+
+\# model set up----
+
+```{r}
+# 1) random forest approach
+df_final <- read.csv(paste0(path,paste("Data files/R1 data/r1_aa_plus_ngly.csv"))) %>% glimpse()
+df_final[-c(1:3)] <- lapply(df_final[-c(1:3)], factor) 
+df_final <- df_final %>%
+  mutate(r1.1=as.factor(ifelse(r1<0.3,0,1)),) %>%
+  relocate(r1.1,.after = r1) %>%
+  subset(., select=-c(id,r1,lab)) %>% 
+  glimpse()
+# store 20% of data for model validation later
+set.seed(1567)
+split <- sample.split(df_final$r1.1, SplitRatio = 0.8)
+df_final.mod <- df_final[split==T,] %>% glimpse()#87 pairs
+df_final.valid <- df_final[split==F,]%>% glimpse()#21 pairs
+
+# split remaining data into training and test data
+split <- sample.split(df_final.mod$r1.1, SplitRatio = 0.8)
+df_final.train <- df_final.mod[split==T,]%>% glimpse()#70
+df_final.test <- df_final.mod[split==F,]%>% glimpse()#17
+
+# design and tune model with all columns
+set.seed(1567)
+features <- setdiff(names(df_final.train),"r1.1")
+
+hyper_grid <- expand.grid(
+  mtry       = seq(2, ncol(df_final.train) * 0.8, by = 2),
+  nodesize  = seq(2, 20, by = 2),
+  samplesize = c(.55, .632, .70, .80),
+  OOB   = 0,
+  bal.acc =0
+  
+)
+nrow(hyper_grid)
+set.seed(1567)
+for (i in 1:nrow(hyper_grid)) {
+  # Train a Random Forest model
+  model <- randomForest(r1.1~., data=df_final.train, 
+                        ntree = 500,
+                        mtry = hyper_grid$mtry[i],importance=F,
+                        nodesize = hyper_grid$nodesize[i],
+                        sample.fraction = hyper_grid$samplesize[i])
+  
+  # Store OOB error for the model                      
+  hyper_grid$OOB[i] <- model$err.rate[nrow(model$err.rate), "OOB"]
+  p <- predict(model,newdata=df_final.test) #Predictions on Test Set for each Tree
+  ba <- confusionMatrix(p,df_final.test$r1.1,positive="1")$byClass[11]#record the balanced accuracy
+  hyper_grid$bal.acc[i] <- ba 
+}
+hyper.dat <- hyper_grid %>% 
+  dplyr::arrange(desc(bal.acc)) %>%
+  #head(10) %>% # see top ten combinations
+  dplyr::slice(1);hyper.dat # get best model has 
+
+opt.sero.o.rf <- randomForest(r1.1~., data=df_final.train, 
+                                  type= "classification",
+                                  ntree = 500,
+                                  mtry = hyper.dat$mtry,
+                                  nodesize = hyper.dat$nodesize,
+                                  sample.fraction = hyper.dat$samplesize,
+                                  importance=T)
+
+
+opt.sero.o.rf #14.29% 
+
+p <- predict(opt.sero.o.rf,newdata=df_final.test) #Predictions on Test Set for each Tree
+confusionMatrix(p,df_final.test$r1.1,positive="1") # Bal acc 0.833
+roc.curve(df_final.test$r1.1,p)#0.833
+
+
+```
+
+\# model accuracy is good but the sensitivity is horrible, try improving it
+
+```{r}
+
+# A) Add cross validation
+control <- trainControl(method="adaptive_cv", number=10, repeats=100)
+opt.sero.o.rf.cv <- randomForest(r1.1~., data=df_final.train, 
+                       method='rf',
+                       type= "classification",
+                       ntree = 500,
+                       mtry = hyper.dat$mtry,
+                       nodesize = hyper.dat$nodesize,
+                       sample.fraction = hyper.dat$samplesize,
+                       trControl=control,
+                       metric='Accuracy',
+                       importance=T,
+                       seed=1567)
+
+
+
+opt.sero.o.rf.cv #15.71% 
+
+p <- predict(opt.sero.o.rf.cv,newdata=df_final.test) #Predictions on Test Set for each Tree
+confusionMatrix(p,df_final.test$r1.1,positive="1") # Bal acc 0.9412
+roc.curve(df_final.test$r1.1,p)#NA 
+  # this model is great! check performance on novel data
+p <- predict(opt.sero.o.rf.cv,newdata=df_final.valid) 
+confusionMatrix(p,df_final.valid$r1.1,positive="1") # Bal acc 0.9048
+roc.curve(df_final.valid$r1.1,p)#NA
+
+# B)Remove sites with no variation----
+## manually
+df_final <- read.csv(paste0(path,paste("Data files/R1 data/r1_aa_plus_ngly.csv"))) 
+
+df_final <- subset(df_final, select=-c(lab)) %>% glimpse()
+df_final.sum <-as.data.frame( df_final[,-c(1:3)] %>%
+                    #replace(is.na(.), 0) %>%
+                    summarise_all(sum))
+
+df_final.sum <- as.data.frame(t(df_final.sum)) %>% glimpse()
+df_final.sum$site <- colnames(df_final[,-c(1:3)])
+df_final.sum <- df_final.sum %>% relocate (site)
+df_final.sum$V1 <- as.numeric(df_final.sum$V1)
+df_final.sum$keep <- ifelse(214-df_final.sum$V1 >=107,1,0) #0.2*214
+df_final.keep <- c("id","r1","aa.dist",df_final.sum[df_final.sum$keep==1,]$site)
+
+df_final.trim <- df_final[,df_final.keep] %>% glimpse() # smaller dataset
+
+df_final.trim[-c(1:3)] <- lapply(df_final.trim[-c(1:3)], factor) 
+df_final.trim <- df_final.trim %>%
+  mutate(r1.1=as.factor(ifelse(r1<0.3,0,1))) %>%
+  relocate(r1.1,.after = r1) %>%
+  subset(., select=-c(id,r1)) %>% 
+  glimpse()
+# store 20% of data for model validation later
+set.seed(1567)
+split <- sample.split(df_final.trim$r1.1, SplitRatio = 0.8)
+df_final.trim.mod <- df_final.trim[split==T,] %>% glimpse()#87 pairs
+df_final.trim.valid <- df_final.trim[split==F,]%>% glimpse()#21 pairs
+
+# split remaining data into training and test data
+split <- sample.split(df_final.trim.mod$r1.1, SplitRatio = 0.8)
+df_final.trim.train <- df_final.trim.mod[split==T,]%>% glimpse()#70
+df_final.trim.test <- df_final.trim.mod[split==F,]%>% glimpse()#17
+
+# design and tune model with trimmed data and run model with cv
+set.seed(1567)
+features <- setdiff(names(df_final.trim.train),"r1.1")
+
+hyper_grid <- expand.grid(
+  mtry       = seq(2, ncol(df_final.trim.train) * 0.8, by = 2),
+  nodesize  = seq(2, 20, by = 2),
+  samplesize = c(.55, .632, .70, .80),
+  OOB   = 0,
+  bal.acc =0
+  
+)
+nrow(hyper_grid)
+set.seed(1567)
+for (i in 1:nrow(hyper_grid)) {
+  # Train a Random Forest model
+  model <- randomForest(r1.1~., data=df_final.trim.train, 
+                        ntree = 500,
+                        mtry = hyper_grid$mtry[i],importance=F,
+                        nodesize = hyper_grid$nodesize[i],
+                        sample.fraction = hyper_grid$samplesize[i])
+  
+  # Store OOB error for the model                      
+  hyper_grid$OOB[i] <- model$err.rate[nrow(model$err.rate), "OOB"]
+  p <- predict(model,newdata=df_final.trim.test) #Predictions on Test Set for each Tree
+  ba <- confusionMatrix(p,df_final.trim.test$r1.1,positive="1")$byClass[11]#record the balanced accuracy
+  hyper_grid$bal.acc[i] <- ba 
+}
+
+hyper.dat <- hyper_grid %>% 
+  dplyr::arrange(desc(bal.acc)) %>%
+  #head(10) %>% # see top ten combinations
+  dplyr::slice(1);hyper.dat # get best model has 
+
+# use best model form above (cv+tuning)
+control <- trainControl(method="adaptive_cv", number=10, repeats=100)
+opt.sero.o.rf.trim.cv <- randomForest(r1.1~., data=df_final.trim.train, 
+                                 method='rf',
+                                 type= "classification",
+                                 ntree = 500,
+                                 mtry = hyper.dat$mtry,
+                                 nodesize = hyper.dat$nodesize,
+                                 sample.fraction = hyper.dat$samplesize,
+                                 trControl=control,
+                                 metric='Accuracy',
+                                 importance=T,
+                                 seed=1567)
+
+
+
+opt.sero.o.rf.trim.cv #15.71% 
+
+p <- predict(opt.sero.o.rf.trim.cv,newdata=df_final.trim.test) #Predictions on Test Set for each Tree
+confusionMatrix(p,df_final.trim.test$r1.1,positive="1") # Bal acc 0.8824 
+roc.curve(df_final.trim.test$r1.1,p)#NA 
+
+# this model is no better from the earlier versions great 
+
+
+# C)SMOTE to remedy imbalance and rerun cv model----
+#devtools::install_version("DMwR",version="0.4.1")
+library(DMwR)
+
+smote.df_final.train <- SMOTE(r1.1~., data = df_final.train, perc.over = 200, perc.under = 200)
+table(smote.df_final.train$r1.1)
+
+control <- trainControl(method="adaptive_cv", number=10, repeats=100)
+opt.sero.o.rf.cv.smote <- randomForest(r1.1~., data=smote.df_final.train, 
+                                 method='rf',
+                                 type= "classification",
+                                 ntree = 500,
+                                 mtry = hyper.dat$mtry,
+                                 nodesize = hyper.dat$nodesize,
+                                 sample.fraction = hyper.dat$samplesize,
+                                 trControl=control,
+                                 metric='Accuracy',
+                                 importance=T,
+                                 seed=1567)
+
+
+
+opt.sero.o.rf.cv.smote #9.18%
+
+p <- predict(opt.sero.o.rf.cv.smote,newdata=df_final.test) #Predictions on Test Set for each Tree
+confusionMatrix(p,df_final.test$r1.1,positive="1") # Bal acc 0.9286
+roc.curve(df_final.test$r1.1,p)#NA 
+# this model is great! check performance on novel data
+p <- predict(opt.sero.o.rf.cv,newdata=df_final.valid) 
+confusionMatrix(p,df_final.valid$r1.1,positive="1") # Bal acc 0.8456
+roc.curve(df_final.valid$r1.1,p)#0.846
+# this is great, keep model!
+
+# D) Can combining BORUTA,SMOTE and CV improve the model more?
+# add BORUTA sifting ----
+y.o <- df_final[,2] %>% glimpse()
+x.o <- df_final[,-c(1:2)] %>% glimpse()
+set.seed(1567)
+ImpVar.o <- Boruta(x.o, y.o, doTrace = 0, maxRuns = 100,mcAdj = T,
+                       getImp = getImpRfZ)
+print(ImpVar.o)
+ret.df_final <- getSelectedAttributes(ImpVar.o, withTentative = T) %>%glimpse()
+df_final.br <- subset(df_final, select=c("r1", ret.df_final)) %>% na.omit() %>% glimpse()
+
+# data splits
+df_final.br[-c(1:2)] <- lapply(df_final.br[-c(1:2)], factor) 
+df_final.br <- df_final.br %>%
+  mutate(r1.1=as.factor(ifelse(r1<0.3,0,1))) %>%
+  relocate(r1.1,.after = r1) %>%
+  subset(., select=-c(r1)) %>% 
+  glimpse()
+# store 20% of data for model validation later
+set.seed(1567)
+split <- sample.split(df_final.br$r1.1, SplitRatio = 0.8)
+df_final.br.mod <- df_final.br[split==T,] %>% glimpse()#87 pairs
+df_final.br.valid <- df_final.br[split==F,]%>% glimpse()#21 pairs
+
+# split remaining data into training and test data
+split <- sample.split(df_final.br.mod$r1.1, SplitRatio = 0.8)
+df_final.br.train <- df_final.br.mod[split==T,]%>% glimpse()#70
+df_final.br.test <- df_final.br.mod[split==F,]%>% glimpse()#17
+
+# design and tune model with boruta selcted features
+set.seed(1567)
+features <- setdiff(names(df_final.br.train),"r1.1")
+
+hyper_grid <- expand.grid(
+  mtry       = seq(2, ncol(df_final.br.train) * 0.8, by = 2),
+  nodesize  = seq(2, 20, by = 2),
+  samplesize = c(.55, .632, .70, .80),
+  OOB   = 0,
+  bal.acc =0
+  
+)
+nrow(hyper_grid)
+set.seed(1567)
+for (i in 1:nrow(hyper_grid)) {
+  # Train a Random Forest model
+  model <- randomForest(r1.1~., data=df_final.br.train, 
+                        ntree = 500,
+                        mtry = hyper_grid$mtry[i],importance=F,
+                        nodesize = hyper_grid$nodesize[i],
+                        sample.fraction = hyper_grid$samplesize[i])
+  
+  # Store OOB error for the model                      
+  hyper_grid$OOB[i] <- model$err.rate[nrow(model$err.rate), "OOB"]
+  p <- predict(model,newdata=df_final.br.test) #Predictions on Test Set for each Tree
+  ba <- confusionMatrix(p,df_final.br.test$r1.1,positive="1")$byClass[11]#record the balanced accuracy
+  hyper_grid$bal.acc[i] <- ba 
+}
+hyper.dat <- hyper_grid %>% 
+  dplyr::arrange(desc(bal.acc)) %>%
+  #head(10) %>% # see top ten combinations
+  dplyr::slice(1);hyper.dat # get best model has 
+
+opt.sero.o.br.rf <- randomForest(r1.1~., data=df_final.br.train, 
+                              type= "classification",
+                              ntree = 500,
+                              mtry = hyper.dat$mtry,
+                              nodesize = hyper.dat$nodesize,
+                              sample.fraction = hyper.dat$samplesize,
+                              importance=T)
+
+
+opt.sero.o.br.rf #12.86% 
+
+
+# apply SMOTE+cv model 
+smote.df_final.br.train <- SMOTE(r1.1~., data = df_final.br.train, perc.over = 200, perc.under = 200)
+table(smote.df_final.br.train$r1.1)
+
+control <- trainControl(method="adaptive_cv", number=10, repeats=100)
+opt.sero.o.br.rf.cv.smote <- randomForest(r1.1~., data=smote.df_final.br.train, 
+                                       method='rf',
+                                       type= "classification",
+                                       ntree = 500,
+                                       mtry = hyper.dat$mtry,
+                                       nodesize = hyper.dat$nodesize,
+                                       sample.fraction = hyper.dat$samplesize,
+                                       trControl=control,
+                                       metric='Accuracy',
+                                       importance=T,
+                                       seed=1567)
+
+
+
+opt.sero.o.rf.cv.smote #9.18% 
+
+p <- predict(opt.sero.o.br.rf.cv.smote,newdata=df_final.br.test) #Predictions on Test Set for each Tree
+confusionMatrix(p,df_final.br.test$r1.1,positive="1") # Bal acc 0.9286
+roc.curve(df_final.br.test$r1.1,p)#0.964 
+# this model is the same as the smote+cv on full all columns
+p <- predict(opt.sero.o.br.rf.cv.smote,newdata=df_final.br.valid) 
+confusionMatrix(p,df_final.br.valid$r1.1,positive="1") # Bal acc 0.9706
+roc.curve(df_final.br.valid$r1.1,p)#0.971
+
+
+```
+
+## Conclusion
+
+At this point, the best publishable model is the either boruta adjusted or full unadjusted+ rf+smote+cv model (AUC=97%,Acc=95.2%\[76.2-99.9%\], Se=100%, Sp=94%, PPV=80%, NPV=100%).
+
+Alternative ways to improve the model can include identifying epitopes and adding within epitope distances and site distances as features in the model.
