@@ -35,11 +35,13 @@ This project aimed to predict antigenic cross-neutralization (r1 values) between
 
 ## Key Files
 
-| Folder         | File                          | Description                                  |
-|----------------|-------------------------------|----------------------------------------------|
-| `data/`        | `r1_aa_plus_ngly.csv`         | Processed features + outcome used in modeling|
-| `supplementary/` | `r1_table.csv`              | Final table with virus, serum, r1, GenBank ID, study |
-| `scripts/`     | `model_training.R`            | Reproducible R script for full pipeline      |
+## Key Files
+
+| File                   | Description                                  |
+|------------------------|----------------------------------------------|
+| `r1_aa_plus_ngly.csv`  | Processed features + outcome used in modeling |
+| `r1_table.csv`         | Final table with virus, serum, r1, GenBank ID, study |
+| `model_training.R`     | Reproducible R script for full pipeline      |
 
 ---
 
@@ -67,7 +69,7 @@ Shiny App: https://dmakau.shinyapps.io/PredImmune-FMD/
 
 If you use this repository, please cite the associated manuscript:
 
-> Makau D. N., Arzt J., VanderWaal K., et al. (2025). “Machine learning‑based prediction of cross‑neutralization among FMDV serotype O viruses using VP1 sequence features.” PLOS Computational Biology, (in review)..
+> Makau D. N., Arzt J., VanderWaal K., (2025). “Machine learning‑based prediction of cross‑neutralization among FMDV serotype O viruses using VP1 sequence features.” PLOS Computational Biology, (in review)..
 
 ---
 
