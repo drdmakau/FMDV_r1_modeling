@@ -41,7 +41,7 @@ This project aimed to predict antigenic cross-neutralization (r1 values) between
 |------------------------|----------------------------------------------|
 | `r1_aa_plus_ngly.csv`  | Processed features + outcome used in modeling |
 | `r1_table.csv`         | Final table with virus, serum, r1, GenBank ID, study |
-| `model_training.R`     | Reproducible R script for full pipeline      |
+| `R1 analysis serotype O.v1.qmd`     | Reproducible R script for full pipeline      |
 
 ---
 
